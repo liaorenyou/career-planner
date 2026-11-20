@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  career-planner 每日 08:00 推送兜底（launchd 模板，不要直接拷到 ~/Library/LaunchAgents）
+
+  __NODE__ / __SCRIPT__ / __PKG__ / __DSHHOME__ 由 install.sh 替换成真实绝对路径。
+  StartCalendarInterval 用的是本机系统时区；本机需为 Asia/Shanghai，install.sh 会检查并提示。
+
+  安装：  ./launchd/install.sh
+  卸载：  ./launchd/install.sh --uninstall
+  手动跑：node bin/push-cron.mjs --dry
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.career-planner.push</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__SCRIPT__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PKG__</string>
+
+  <!-- 每天 08:02 触发：宿主进程内的 08:00 定时器是主推送，这里是「DSH 没开着」时的兜底。
+       错开 2 分钟可以避免两个调度器同分钟读写 lastPushAt 的竞态（否则极端情况下会推两条）。 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>2</integer>
+  </dict>
+
+  <!-- 开机会不会补跑：false，避免每次登录都推一条；错过就等第二天/手动跑 -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__DSHHOME__/career-planner/push-cron.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__DSHHOME__/career-planner/push-cron.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- 固定 DSH_HOME，保证 launchd 读到的数据和 DSH 面板一致 -->
+    <key>DSH_HOME</key>
+    <string>__DSHHOME__</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

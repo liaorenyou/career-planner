@@ -1,0 +1,19 @@
+# 升学生涯规划插件 · 组合包补丁
+#
+# 用 insert 而不是覆盖：不动宿主已有的插件列表。
+#
+# 这里的 config 只是**默认值**，用户想改就在自己 profile 的 patch 层覆盖
+# （profile 的 cordis.patch.yml 里同 id 的 insert 会覆盖这份），或者在
+# 「生涯规划」面板里改 —— 面板改的是数据文件，不是这份 yml。
+- insert:
+    - id: career-planner
+      name: '@local/career-planner'
+      config:
+        # 时区：所有“今天”“早八点”都按这个时区算
+        timeZone: 'Asia/Shanghai'
+        # 每天生成计划并推送的时刻（HH:MM，本地墙钟时间）
+        pushTime: '08:00'
+        # 推送通道；qq 走 QQ 官方机器人主动消息，wechat 走 iLink（可能失效，会优雅降级）
+        channels: ['qq', 'wechat']
+        # 数据目录；留空 = $DSH_HOME/career-planner（默认 ~/.dsh/career-planner）
+        dataDir: ''

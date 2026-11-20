@@ -1,0 +1,17 @@
+node_modules/
+*.log
+.DS_Store
+
+# 本机运行时数据（绝不入库：含 QQ 数据库密钥、聊天记录、个人画像）
+data/
+outbox/
+*.db
+*.db-wal
+*.db-shm
+dbkey.txt
+*.pyc
+__pycache__/
+
+# 取密钥脚本运行时会拉取的 QQ 副本，体积大且含个人数据
+app/
+copydata/
