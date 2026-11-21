@@ -78,6 +78,22 @@ dsh plugin add ~/career-planner
 - 时间轴：每块显示时段、标题、类型徽标、为什么排它、完成标准，点一下勾选完成。
 - 下方：待办任务（可勾选）、升学就业目标（带倒计时）、联网情报、推送状态。
 
+## 换成你自己的（所有个人信息都是可替换的）
+
+仓库里**没有任何人的真实身份、学校、群号、机器人凭据或聊天内容**——这些都在运行时数据里，
+换成你自己的方式如下：
+
+| 要替换的东西 | 放哪 / 怎么改 | 示例 |
+|---|---|---|
+| 时区、推送时刻、通道、数据目录 | `cordis.patch.yml` 的 `config`（`timeZone` / `pushTime` / `channels` / `dataDir`），或面板里的推送设置 | `timeZone: 'Asia/Shanghai'` |
+| 每日要闻的检索方向 | `config.briefQueries`（不填用默认的科技/AI 三条） | `briefQueries: ['考研 政策 变化']` |
+| 你的身份 / 目标 / 时间约束 | `career_profile_set` 工具（推荐），或照 `examples/profile.example.json` 手写 `profile.json` | `school: 'YOUR_SCHOOL'` |
+| 要读的 QQ 群 | `career_groups` 工具增删（`groups.json`），或照 `examples/groups.example.json` 手写 | `code: 100000001` |
+| 机器人凭据（QQ/微信） | 由 DSH 的 IM 桥接插件管理（`im-bridge/bot` 凭据记录、`~/.dsh/im-bridge-weixin.json`），本插件只读不写 | 不要把 AppID/Secret 提交进仓库 |
+| QQ 库解密钥匙 | 本机自己跑 `python3 tools/extract_key.py` 取到 `qq/dbkey.txt`（600 权限），`qq/` 整个目录已进 `.gitignore` | — |
+
+`examples/` 下两个文件就是占位模板：复制改名后把 `YOUR_*`、`1000000xx` 换成你自己的即可。
+
 ## 数据文件（都是普通 JSON，可自己备份/手改）
 
 ```

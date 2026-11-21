@@ -1,0 +1,65 @@
+{
+  "_comment": "示例画像。复制到 ~/.dsh/career-planner/profile.json，或直接用 career_profile_set 工具写入；下面全是占位值，换成你自己的。",
+  "identity": {
+    "name": "YOUR_NAME",
+    "school": "YOUR_SCHOOL",
+    "major": "YOUR_MAJOR",
+    "grade": "大二",
+    "gradYear": 2030
+  },
+  "goals": [
+    {
+      "id": "g_example_postgrad",
+      "kind": "postgrad",
+      "title": "争取保研（读研薪资更高则走这条）",
+      "target": "目标院校 / 目标方向写在这里",
+      "priority": 1,
+      "nextActions": [
+        "把今天该做的那一节习题做完并订错",
+        "查一遍本校本专业保研细则，记 3 条要点",
+        "整理本周错题，挑 5 道重做"
+      ]
+    },
+    {
+      "id": "g_example_job",
+      "kind": "job",
+      "title": "多刷实习 → 直接就业（待遇更高则走这条）",
+      "target": "目标岗位 / 目标行业写在这里",
+      "priority": 2,
+      "nextActions": [
+        "刷 3 个目标岗位 JD，记下重复出现的关键词",
+        "用 SolidWorks 跟练 1 个零件",
+        "把简历改一版，补上本周新做的东西"
+      ]
+    }
+  ],
+  "constraints": {
+    "dailyMinutes": 180,
+    "wakeAt": "07:30",
+    "quietStart": "23:30",
+    "quietEnd": "07:00",
+    "sleepAt": "23:30",
+    "daysOff": [0],
+    "weekdayMinutes": {
+      "0": 240,
+      "1": 180,
+      "2": 180,
+      "3": 180,
+      "4": 180,
+      "5": 180,
+      "6": 240
+    }
+  },
+  "resources": [
+    {
+      "kind": "course",
+      "title": "示例课程：高等数学A(一)",
+      "detail": "每周二 21:10-21:50 自习推进",
+      "tags": ["必修"]
+    }
+  ],
+  "prefs": {
+    "ignoreTopics": ["诗歌", "散文", "征文", "晚会", "篮球赛"],
+    "focusTopics": ["保研", "实习", "学科竞赛"]
+  }
+}
