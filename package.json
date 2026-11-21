@@ -1,6 +1,6 @@
 {
   "name": "@local/career-planner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "升学生涯规划插件：抓取课程表/作业/聊天记录，以升学就业为导向排每天的计划，联网研究目标与院校信息，QQ/微信早八点自动推送，并带一个可视化面板。",
   "type": "module",
   "main": "index.js",
