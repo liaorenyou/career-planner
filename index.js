@@ -27,6 +27,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statS
 import * as store from './lib/store.js';
 import { planDay } from './lib/planner.js';
 import { formatPlanMessage, planDisplayIndex, pushAll } from './lib/push.js';
+import { DEFAULT_NEWS_QUERIES, collectNews, formatNewsSection, pickNewsForDate } from './lib/news.js';
 import {
   defaultCredentialsPath,
   defaultPaths as imPaths,
@@ -268,7 +269,7 @@ export function apply(ctx, config = {}) {
   let data = null;
   let loadPromise = null;
   let digest = '';
-  let meta = { lastScanAt: '', lastScanCount: 0, lastPushText: '', lastPushDate: '', lastPushIndex: [], lastChatImportAt: '', lastChatImportCount: 0, lastQQOpenid: '' };
+  let meta = { lastScanAt: '', lastScanCount: 0, lastPushText: '', lastPushDate: '', lastPushIndex: [], lastChatImportAt: '', lastChatImportCount: 0, lastQQOpenid: '', lastNewsDate: '', lastNews: [] };
   let writeChain = Promise.resolve();
 
   function withLock(fn) {
@@ -291,6 +292,8 @@ export function apply(ctx, config = {}) {
             lastPushDate: typeof savedMeta.lastPushDate === 'string' ? savedMeta.lastPushDate : '',
             lastPushIndex: Array.isArray(savedMeta.lastPushIndex) ? savedMeta.lastPushIndex : [],
             lastQQOpenid: String(savedMeta.lastQQOpenid || ''),
+            lastNewsDate: typeof savedMeta.lastNewsDate === 'string' ? savedMeta.lastNewsDate : '',
+            lastNews: Array.isArray(savedMeta.lastNews) ? savedMeta.lastNews.slice(0, 6) : [],
             lastChatImportAt: typeof savedMeta.lastChatImportAt === 'string' ? savedMeta.lastChatImportAt : '',
             lastChatImportCount: Number(savedMeta.lastChatImportCount) || 0,
           };
@@ -422,6 +425,10 @@ export function apply(ctx, config = {}) {
     if (intel.length) {
       const latest = intel[0];
       if (latest && latest.title) lines.push(`- 最近一条联网情报：${latest.title}`);
+    }
+    const newsToday = meta.lastNewsDate === today && Array.isArray(meta.lastNews) ? meta.lastNews : [];
+    if (newsToday.length) {
+      lines.push(`- 今日要闻（已随早报推送给人）：${newsToday.slice(0, 2).map((item) => item.title).join('；')}`);
     }
 
     if (groupsCache && groupsCache.length) {
@@ -568,13 +575,87 @@ export function apply(ctx, config = {}) {
     };
   }
 
+  /**
+   * 今日要闻：早晚各一次不重复联网。当天已抓过就直接复用（面板刷新/午间补推都走缓存），
+   * 抓不到就退回情报库里今天已存的要闻，再没有就空着——推送绝不因为要闻失败而失败。
+   */
+  async function gatherNews({ force = false, date = '' } = {}) {
+    const today = date || store.dateKeyIn(new Date(), cfg.timeZone);
+    if (!force && meta.lastNewsDate === today && Array.isArray(meta.lastNews) && meta.lastNews.length) {
+      return { items: meta.lastNews, cached: true, errors: [] };
+    }
+    const d = await ensureData();
+    const prefs = d.profile?.prefs || store.normalizePrefs({});
+    const webService = web;
+    if (!webService || typeof webService.search !== 'function') {
+      const saved = pickNewsForDate(d.intel, today);
+      return { items: saved, cached: true, errors: ['宿主没有可用的联网搜索服务'] };
+    }
+    const queries = Array.isArray(cfg.briefQueries) && cfg.briefQueries.length ? cfg.briefQueries : DEFAULT_NEWS_QUERIES;
+    let result;
+    try {
+      result = await collectNews({
+        web: webService,
+        queries,
+        maxItems: 3,
+        prefs,
+        isIgnored: (text) => store.isIgnoredText(text, prefs),
+      });
+    } catch (error) {
+      log('news-failed', error);
+      return { items: pickNewsForDate(d.intel, today), cached: false, errors: [String(error?.message || error)] };
+    }
+    const items = Array.isArray(result.items) ? result.items : [];
+    if (items.length) {
+      meta.lastNewsDate = today;
+      meta.lastNews = items;
+      await saveMeta();
+      const fresh = items.map((item) => store.normalizeIntelItem({
+        title: item.title,
+        summary: item.snippet || '',
+        url: item.url,
+        source: item.source || '',
+        kind: 'news',
+        date: today,
+        fetchedAt: store.nowIso(),
+        tags: ['要闻'].concat(item.query ? [item.query.slice(0, 20)] : []),
+      }));
+      const seen = new Set();
+      const merged = [];
+      for (const item of [...fresh, ...d.intel]) {
+        const key = item.url || item.id;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(item);
+      }
+      d.intel = await store.saveIntel(p, merged.slice(0, 400));
+      refreshDigest();
+    }
+    log('news-collected', { count: items.length, errors: result.errors || [] });
+    return { items, cached: false, errors: result.errors || [] };
+  }
+
   async function doPush({ plan, text, reason = 'manual' }) {
     const d = await ensureData();
     const now = new Date();
     const date = plan?.date || store.dateKeyIn(now, cfg.timeZone);
-    const message = typeof text === 'string' && text.trim()
+    const custom = typeof text === 'string' && text.trim();
+    // 日报正文里带「今日要闻」；自定义文本（如通道自检）不掺要闻。
+    let news = [];
+    let newsErrors = '';
+    if (!custom && cfg.brief !== false) {
+      try {
+        const gathered = await gatherNews({ date });
+        news = gathered.items || [];
+        newsErrors = (gathered.errors || []).join('；');
+      } catch (error) {
+        log('news-failed', error);
+        newsErrors = String(error?.message || error);
+      }
+    }
+    const message = custom
       ? text.trim()
-      : formatPlanMessage({ plan, profile: d.profile, date });
+      : formatPlanMessage({ plan, profile: d.profile, date, news });
     const targets = await resolvePushTargets();
     const results = await pushAll({ text: message, plan, targets });
     const byChannel = {};
@@ -592,8 +673,8 @@ export function apply(ctx, config = {}) {
     meta.lastPushDate = date;
     meta.lastPushIndex = displayIndex;
     await saveMeta();
-    log('pushed', { reason, channels: Object.keys(byChannel), ok: results.filter((r) => r.ok).map((r) => r.channel) });
-    return { results, text: message };
+    log('pushed', { reason, channels: Object.keys(byChannel), ok: results.filter((r) => r.ok).map((r) => r.channel), news: news.length });
+    return { results, text: message, news, newsErrors };
   }
 
   const okAny = (results) => Array.isArray(results) && results.some((r) => r.ok);
@@ -847,7 +928,18 @@ export function apply(ctx, config = {}) {
     }
     if (Array.isArray(patch.goals)) {
       const incoming = patch.goals.map(store.normalizeGoal);
-      next.goals = replaceGoals ? incoming : [...current.goals, ...incoming];
+      if (replaceGoals) {
+        next.goals = incoming;
+      } else {
+        // 同 id = 更新这个目标（例如补上 nextActions），否则追加。
+        // 不这么做的话，每次补字段都会多出一条重复目标。
+        const byId = new Map(current.goals.map((goal) => [goal.id, goal]));
+        for (const goal of incoming) {
+          if (goal.id && byId.has(goal.id)) byId.set(goal.id, { ...byId.get(goal.id), ...goal });
+          else byId.set(goal.id, goal);
+        }
+        next.goals = [...byId.values()];
+      }
     } else if (replaceGoals) {
       next.goals = [];
     }
@@ -1054,6 +1146,17 @@ export function apply(ctx, config = {}) {
     const block = (plan.blocks || []).find((b) => b.id === blockId);
     if (!block) return { ok: false, message: '找不到这个时间块', date };
     block.done = done === undefined ? !block.done : Boolean(done);
+    // 计划块如果对应任务 breakdown 里的某一步，勾块就把那一步也勾上：
+    // 这样「每天做一步」的进度落在任务上，下次排程会跳过已完成的步骤。
+    if (Array.isArray(block.taskIds) && block.taskIds.length && Number.isInteger(block.stepIndex)) {
+      const owner = d.tasks.find((t) => t.id === block.taskIds[0]);
+      const steps = owner && Array.isArray(owner.breakdown) ? owner.breakdown : null;
+      if (steps && steps[block.stepIndex]) {
+        steps[block.stepIndex].done = Boolean(block.done);
+        owner.updatedAt = store.nowIso();
+        await persistTasks();
+      }
+    }
     // 时间块勾上 = 它关联的任务也完成（一个任务可能拆成多个块，全部块完成才置为 done）
     if (Array.isArray(block.taskIds) && block.taskIds.length) {
       for (const taskId of block.taskIds) {
@@ -1889,6 +1992,39 @@ export function apply(ctx, config = {}) {
           : `没有检索到结果${searchError ? `（${searchError}）` : ''}，可以换个更具体的关键词。`,
         items,
         searchError,
+      };
+    },
+  });
+
+  // ---- career_brief：今天值得知道的时事（早报会自动带上，这里用于手动查询/刷新）
+  defineCareerTool({
+    name: 'career_brief',
+    description:
+      '抓取今天值得知道的时事要闻（人工智能/科技突破/教育政策这类「大新闻」），返回 2-3 条标题+来源+链接。'
+      + '每天早八点的日报自动附在任务下面，一般不用手动调用；用户问「今天有什么大事」「AI 又出什么新闻了」时用它。',
+    parameters: {
+      type: 'object',
+      properties: {
+        refresh: { type: 'boolean', description: 'true 时忽略当天缓存，重新联网抓（默认 false）' },
+        maxItems: { type: 'number', description: '最多返回几条，默认 3' },
+      },
+    },
+    async execute(args) {
+      const today = store.dateKeyIn(new Date(), cfg.timeZone);
+      const gathered = await gatherNews({ force: args?.refresh === true, date: today });
+      const limit = Math.min(6, Math.max(1, Number(args?.maxItems) || 3));
+      const items = (gathered.items || []).slice(0, limit);
+      const section = formatNewsSection(items, today);
+      return {
+        ok: items.length > 0,
+        message: items.length
+          ? `${today} 要闻 ${items.length} 条${gathered.cached ? '（当天缓存）' : '（刚刚联网抓取）'}：${items.map((i) => i.title).join('；')}`
+          : `今天还没抓到要闻${(gathered.errors || []).length ? `（${gathered.errors.join('；')}）` : ''}`,
+        date: today,
+        items,
+        section,
+        cached: gathered.cached,
+        errors: gathered.errors || [],
       };
     },
   });

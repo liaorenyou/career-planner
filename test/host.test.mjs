@@ -129,11 +129,11 @@ const tool = (name) => {
 };
 const call = async (name, args) => tool(name).execute(args ?? {}, {});
 
-test('注册了全部 11 个工具，且都有 description / parameters / output.render', () => {
+test('注册了全部 12 个工具，且都有 description / parameters / output.render', () => {
   const expected = [
     'career_get', 'career_profile_set', 'career_tasks_add', 'career_task_update',
     'career_plan_generate', 'career_chat_scan', 'career_research', 'career_push', 'career_done',
-    'career_groups', 'career_chat_import',
+    'career_groups', 'career_chat_import', 'career_brief',
   ];
   for (const name of expected) {
     const definition = tool(name);

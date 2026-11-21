@@ -206,7 +206,8 @@ function endMin(block) {
 /**
  * 构造性硬约束检查（CONTRACT §2.2 + §2.3）：
  * 字段齐全、时间轴有序不重叠、不越出 wakeAt~quietStart、end>start、
- * totalMinutes === 非 buffer/break 块分钟和、load.planned === totalMinutes。
+ * totalMinutes === 非 buffer/break 块分钟和（含固定块，语义不变）、
+ * load.planned === totalMinutes - load.fixedMinutes（可自由安排的分钟数）。
  */
 function assertPlanInvariants(plan, options = {}) {
   const { wakeAt = '07:30', quietStart = '23:30', checkCapacity = true } = options;
@@ -225,7 +226,8 @@ function assertPlanInvariants(plan, options = {}) {
   assert.ok(Array.isArray(plan.warnings));
   assert.equal(typeof plan.totalMinutes, 'number');
   assert.equal(typeof plan.load, 'object');
-  assert.equal(plan.load.planned, plan.totalMinutes);
+  assert.equal(typeof plan.load.fixedMinutes, 'number');
+  assert.ok(plan.load.fixedMinutes >= 0);
 
   const wake = minutesOfDay(wakeAt);
   const quiet = minutesOfDay(quietStart);
@@ -274,12 +276,14 @@ function assertPlanInvariants(plan, options = {}) {
     .filter((block) => block.kind !== 'buffer' && block.kind !== 'break')
     .reduce((sum, block) => sum + block.minutes, 0);
   assert.equal(plan.totalMinutes, workMinutes);
-  assert.equal(plan.load.planned, workMinutes);
+  // 新口径：capacity 只约束“可自由安排的分钟数”，固定块（课程/固定训练）只占时间轴。
+  assert.equal(plan.load.planned, workMinutes - plan.load.fixedMinutes);
   assert.equal(typeof plan.load.capacity, 'number');
+  assert.ok(plan.load.capacity >= 0);
   if (checkCapacity) {
     assert.ok(
       plan.load.planned <= plan.load.capacity,
-      `总工时 ${plan.load.planned} 超过 capacity ${plan.load.capacity}`,
+      `可自由安排的分钟 ${plan.load.planned} 超过 capacity ${plan.load.capacity}`,
     );
   }
 
@@ -329,7 +333,7 @@ test('emptyPlan 返回完整 Plan 形状', () => {
   assert.deepEqual(plan.blocks, []);
   assert.deepEqual(plan.unscheduled, []);
   assert.equal(plan.totalMinutes, 0);
-  assert.deepEqual(plan.load, { planned: 0, capacity: 0 });
+  assert.deepEqual(plan.load, { planned: 0, capacity: 0, fixedMinutes: 0 });
   assert.deepEqual(plan.warnings, []);
   assert.ok(!Number.isNaN(new Date(plan.generatedAt).getTime()));
 });
@@ -895,10 +899,9 @@ test('任务时长超过剩余容量：只排能容纳的部分，剩余分钟�
 
 // ============================================================ 15. 课程占满容量
 
-test('固定课程本身超过 capacity：保留课程块、其余全部进 unscheduled 并明确告警（契约冲突边界）', () => {
-  // 说明：CONTRACT §2.2 的 totalMinutes 口径包含课程块，而 §2.3.1 要求总工时 ≤ capacity。
-  // 当用户把 capacity 设得比课程时长还短时两条约束不可能同时满足：课程是既定事实不能删，
-  // 因此这里保课程、清空其余安排，并给出显式告警（宿主面板会把 warnings 展示给用户）。
+test('课程不占 capacity：课程时长超过 capacity 时，任务照样能排进 capacity（新口径）', () => {
+  // 旧口径把课程算进 totalMinutes 预算，课程一多就“容量 0、其余全部未安排”。
+  // 新口径：capacity = 当日可自由安排的分钟数，固定块只占时间轴，因此 extra 仍能排进去。
   const plan = planDay({
     date: SATURDAY,
     now: NOW,
@@ -921,16 +924,20 @@ test('固定课程本身超过 capacity：保留课程块、其余全部进 unsc
     history: [],
     seed: 0,
   });
-  assertPlanInvariants(plan, { checkCapacity: false });
-  assert.ok(plan.warnings.some((warning) => warning.includes('超出今日容量')));
-  assert.equal(blockOf(plan, 'bigcourse').length, 1);
+  assertPlanInvariants(plan);
+  assert.equal(plan.load.capacity, 100);
+  assert.equal(plan.load.fixedMinutes, 120, '固定块 120 分钟单独统计');
+  assert.equal(plan.load.planned, plan.totalMinutes - 120);
+  assert.ok(plan.load.planned <= 100, '可自由安排的时间不超过 capacity');
+  assert.ok(plan.totalMinutes > 100, 'totalMinutes 含固定块，语义不变，可以大于 capacity');
+  assert.equal(blockOf(plan, 'bigcourse').length, 1, '课程原样保留');
   assert.deepEqual(blockOf(plan, 'bigcourse')[0].start, '09:00');
-  // 除了课程（和课程后的缓冲）之外不再排任何工作块
-  const workKinds = plan.blocks
-    .filter((block) => block.kind !== 'buffer' && block.kind !== 'break')
-    .map((block) => block.kind);
-  assert.deepEqual(workKinds, ['course']);
-  assert.ok(plan.unscheduled.some((item) => item.taskId === 'extra'));
+  assert.ok(blockOf(plan, 'extra').length >= 1, '课程不吃容量，任务仍应被排入');
+  assert.ok(!plan.unscheduled.some((item) => item.taskId === 'extra'));
+  assert.ok(
+    !plan.warnings.some((warning) => warning.includes('固定课程已占')),
+    '不再输出「固定课程已占 X 分钟，超出今日容量」这类误导告警',
+  );
 });
 
 // ============================================================ 16. capacity 取值
@@ -1356,34 +1363,46 @@ test('多个目标：只有最高优先目标拿满 25% 产能，另一个只有
   assert.ok(jobMinutes < 60, `非最高优先目标不应拿满 25%（实际 ${jobMinutes} 分钟）`);
 });
 
-test('主线预留被固定课程挤到 0：告警写明被固定课程挤掉，且不重复抱怨', () => {
+test('固定安排占满时间窗：主线预留确实挤不进来时才告警，且说明是“固定安排”而不是“占用容量”', () => {
+  // 新口径：课程/固定训练不吃 capacity，只有时间窗真的被占满（一个空档都没有）才告警。
   const plan = planDay({
     date: SATURDAY,
     now: NOW,
     profile: profileWithCapacity(60, [makeGoal({ id: 'g_top', title: '保研主线', priority: 1 })]),
     tasks: [
       makeTask({
-        id: 'c_big',
-        title: '连上四节的大课',
+        id: 'c_full',
+        title: '从早排到晚的集中训练',
         kind: 'course',
-        startAt: at(SATURDAY, '08:00'),
-        endAt: at(SATURDAY, '09:30'), // 90min > capacity 60
-        estMinutes: 90,
+        startAt: at(SATURDAY, '07:30'),
+        endAt: at(SATURDAY, '23:30'),
+        estMinutes: 960,
       }),
+      makeTask({ id: 't_extra', title: '想排也排不进去的作业', estMinutes: 60 }),
     ],
     history: [],
     seed: 0,
   });
-  assertPlanInvariants(plan, { checkCapacity: false }); // 契约冲突边界：课程本身超过容量
+  assertPlanInvariants(plan);
 
-  assert.equal(mainlineBlock(plan, '保研主线'), null, '容量已满时主线预留拿不到时间');
+  assert.equal(plan.load.fixedMinutes, 960, '固定块占满整个时间窗');
+  assert.equal(plan.load.planned, 0, '没有可自由安排的时间');
+  assert.equal(mainlineBlock(plan, '保研主线'), null, '时间窗占满时主线预留拿不到时间');
   const squeeze = plan.warnings.find((warning) => warning.includes('主线预留被'));
   assert.ok(squeeze, '预留被挤到 0 时必须告警');
-  assert.ok(squeeze.includes('固定课程'), `告警要写明被固定课程挤掉：${squeeze}`);
+  assert.ok(squeeze.includes('固定安排'), `告警要写明是固定安排占了时间窗：${squeeze}`);
   assert.ok(squeeze.includes('0 分钟'));
   assert.ok(
     !plan.warnings.some((warning) => warning.includes('今日未能安排推进块')),
     '同一目标不应同时出现“未能安排推进块”和“预留被挤掉”两条告警',
+  );
+  assert.ok(
+    plan.warnings.some((warning) => warning.includes('几乎没有可自由安排的时间')),
+    '固定安排占满时间窗时要给出“今日只保留既定安排”的提示',
+  );
+  assert.ok(
+    !plan.warnings.some((warning) => warning.includes('固定课程已占')),
+    '不再把“课程 > capacity”当成异常告警',
   );
 });
 
@@ -1632,4 +1651,308 @@ test('白天生成今天的计划：不把块排到已经过去的时间，已�
     plan.blocks.some((b) => b.title.includes('SolidWorks')),
     '真任务应该被排进今天剩下的时间',
   );
+});
+
+// ============================================================ 23. 具体动作命名（goal.nextActions / task.breakdown）
+
+function dayIndexFor(dateKey) {
+  return Math.floor(Date.parse(`${dateKey}T00:00:00Z`) / 86400000);
+}
+
+test('主线块用 goal.nextActions 的具体动作命名：同一天两次一致、次日轮转下一条', () => {
+  const actions = [
+    '把高数 3.1-3.2 习题做到 1-12 题',
+    '整理机械制图点线面投影错题 10 道',
+    '跑通调度器最短作业优先的单元测试',
+  ];
+  const profile = profileWithCapacity(600, [makeGoal({ id: 'g_top', title: '争取保研', nextActions: actions })]);
+  const tasks = [makeTask({ id: 't_plain', title: '普通作业', dueAt: at('2026-11-30', '23:59'), estMinutes: 60 })];
+  const run = (date) => planDay({ date, now: NOW, profile, tasks, history: [], seed: 0 });
+
+  const day1 = run(SATURDAY);
+  const day1Again = run(SATURDAY);
+  assertPlanInvariants(day1);
+  const expected1 = actions[dayIndexFor(SATURDAY) % actions.length];
+  const reserve1 = day1.blocks.find((block) => block.title.startsWith('主线：'));
+  assert.ok(reserve1, '最高优先目标的主线预留块必须存在');
+  assert.equal(reserve1.title, `主线：${expected1}`, '预留块标题必须是今天的具体动作，而不是只有目标名');
+  assert.ok(Array.from(reserve1.title).length <= 40, '标题不超过 40 字');
+  assert.ok(reserve1.why.includes('目标：争取保研'), 'why 里要写清属于哪个目标');
+  assert.ok(reserve1.why.includes('做完再往下一条推进'));
+  assert.ok(reserve1.output.length > 0, 'output 要写清能勾掉的具体结果');
+  assert.deepEqual(day1Again.blocks, day1.blocks, '同一天重复调用，动作与块必须完全一致');
+
+  const day2 = run(SUNDAY);
+  const expected2 = actions[dayIndexFor(SUNDAY) % actions.length];
+  const reserve2 = day2.blocks.find((block) => block.title.startsWith('主线：'));
+  assert.ok(reserve2);
+  assert.equal(reserve2.title, `主线：${expected2}`, '次日要换成下一条动作');
+  assert.notEqual(reserve2.title, reserve1.title);
+});
+
+test('目标没有 nextActions（缺省/空数组）时退回旧文案「主线推进：<title>」，不报错', () => {
+  for (const nextActions of [undefined, [], ['   '], '不是数组']) {
+    const goal = makeGoal({ id: 'g_top', title: '争取保研' });
+    if (nextActions !== undefined) goal.nextActions = nextActions;
+    const plan = planDay({
+      date: SATURDAY,
+      now: NOW,
+      profile: profileWithCapacity(600, [goal]),
+      tasks: [makeTask({ id: 't_plain', title: '普通作业', estMinutes: 60, dueAt: at('2026-11-30', '23:59') })],
+      history: [],
+      seed: 0,
+    });
+    assertPlanInvariants(plan);
+    const reserve = mainlineBlock(plan, '争取保研');
+    assert.ok(reserve, `nextActions=${JSON.stringify(nextActions)} 时应退回「主线推进：争取保研」`);
+    assert.equal(Array.from(reserve.title).length, Array.from('主线推进：争取保研').length);
+  }
+});
+
+test('任务 breakdown 有 3 步：三个块分别用第 1/2/3 步标题，stepIndex = 0/1/2', () => {
+  const steps = [
+    { title: '读题：把第三章 5-12 题的已知条件抄一遍', minutes: 30, done: false },
+    { title: '做完第三章 5-12 题（1-6 题）', minutes: 30, done: false },
+    { title: '订正错题并写 3 条易错点', minutes: 30, done: false },
+  ];
+  const input = {
+    date: SATURDAY,
+    now: NOW,
+    profile: profileWithCapacity(600, [makeGoal()]),
+    tasks: [
+      makeTask({
+        id: 't_steps',
+        title: '高数第三章 5-12 题',
+        estMinutes: 90,
+        dueAt: at('2026-11-30', '23:59'),
+        breakdown: steps,
+      }),
+    ],
+    history: [],
+    seed: 0,
+  };
+  const plan = planDay(input);
+  assertPlanInvariants(plan);
+  const blocks = blockOf(plan, 't_steps');
+  assert.equal(blocks.length, 3, '三个步骤应各开一个块，而不是一个复合标题');
+  assert.deepEqual(blocks.map((block) => block.stepIndex), [0, 1, 2], '块的 stepIndex 必须对应 breakdown 下标');
+  assert.deepEqual(blocks.map((block) => block.title), steps.map((step) => step.title), '块标题必须是具体步骤');
+  assert.deepEqual(blocks.map((block) => block.why.match(/第 \d\/3 步/)[0]), ['第 1/3 步', '第 2/3 步', '第 3/3 步']);
+  assert.ok(blocks.every((block) => block.taskIds.join(',') === 't_steps'));
+
+  const again = planDay(input);
+  assert.deepEqual(again.blocks, plan.blocks, 'breakdown 的步骤分配必须确定性一致');
+});
+
+test('breakdown 首步已完成：从下一个未完成步骤开始，已完成步骤不再开块', () => {
+  const steps = [
+    { title: '第一步已经做完了', minutes: 30, done: true },
+    { title: '做完第三章 5-12 题（1-6 题）', minutes: 30, done: false },
+    { title: '订正错题并写 3 条易错点', minutes: 30, done: false },
+  ];
+  const plan = planDay({
+    date: SATURDAY,
+    now: NOW,
+    profile: profileWithCapacity(600, [makeGoal()]),
+    tasks: [
+      makeTask({ id: 't_partial', title: '高数第三章 5-12 题', estMinutes: 60, breakdown: steps, dueAt: at('2026-11-30', '23:59') }),
+    ],
+    history: [],
+    seed: 0,
+  });
+  assertPlanInvariants(plan);
+  const blocks = blockOf(plan, 't_partial');
+  assert.deepEqual(blocks.map((block) => block.stepIndex), [1, 2]);
+  assert.deepEqual(blocks.map((block) => block.title), [steps[1].title, steps[2].title]);
+  assert.ok(blocks.every((block) => block.why.includes('/3 步')), 'why 里的步数仍以完整 breakdown 为准');
+});
+
+test('breakdown 全部 done：退回旧命名（任务名），不带 stepIndex，也不崩', () => {
+  const plan = planDay({
+    date: SATURDAY,
+    now: NOW,
+    profile: profileWithCapacity(600, [makeGoal()]),
+    tasks: [
+      makeTask({
+        id: 't_all_done_steps',
+        title: '学期末冲 85 分：复习计划',
+        estMinutes: 60,
+        dueAt: at('2026-11-30', '23:59'),
+        breakdown: [
+          { title: '第一步', minutes: 20, done: true },
+          { title: '第二步', minutes: 20, done: true },
+          { title: '第三步', minutes: 20, done: true },
+        ],
+      }),
+    ],
+    history: [],
+    seed: 0,
+  });
+  assertPlanInvariants(plan);
+  const blocks = blockOf(plan, 't_all_done_steps');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].title, '学期末冲 85 分：复习计划');
+  assert.equal(blocks[0].stepIndex, undefined, '没有步骤可消费时不应伪造 stepIndex');
+});
+
+test('步骤标题为空/过短时退回可用文案：空标题用任务名，半句标题加任务名前缀', () => {
+  const emptyTitlePlan = planDay({
+    date: SATURDAY,
+    now: NOW,
+    profile: profileWithCapacity(600, [makeGoal()]),
+    tasks: [
+      makeTask({
+        id: 't_empty_step',
+        title: '整理机械制图投影错题',
+        estMinutes: 30,
+        dueAt: at('2026-11-30', '23:59'),
+        breakdown: [{ title: '', minutes: 30, done: false }],
+      }),
+    ],
+    history: [],
+    seed: 0,
+  });
+  assertPlanInvariants(emptyTitlePlan);
+  const emptyBlocks = blockOf(emptyTitlePlan, 't_empty_step');
+  assert.equal(emptyBlocks.length, 1);
+  assert.equal(emptyBlocks[0].title, '整理机械制图投影错题');
+  assert.equal(emptyBlocks[0].stepIndex, 0);
+
+  const shortTitlePlan = planDay({
+    date: SATURDAY,
+    now: NOW,
+    profile: profileWithCapacity(600, [makeGoal()]),
+    tasks: [
+      makeTask({
+        id: 't_short_step',
+        title: '整理机械制图投影错题',
+        estMinutes: 30,
+        dueAt: at('2026-11-30', '23:59'),
+        breakdown: [{ title: '做题', minutes: 30, done: false }],
+      }),
+    ],
+    history: [],
+    seed: 0,
+  });
+  assertPlanInvariants(shortTitlePlan);
+  const shortBlocks = blockOf(shortTitlePlan, 't_short_step');
+  assert.equal(shortBlocks.length, 1);
+  assert.equal(shortBlocks[0].title, '整理机械制图投影错题｜做题', '半句标题要带上任务名，避免看不懂');
+});
+
+// ============================================================ 24. capacity 新口径：课程不占“可自由安排”的分钟数
+
+test('真实周一（2026-11-23）：4 节课 + 2 个固定训练不吃 capacity，主线预留与逾期任务照样排进去', () => {
+  // 用户原话的痛点：课表 400 分钟 + 固定训练 90 分钟，旧口径把 capacity 180 直接吃光，
+  // 输出「固定课程已占 490 分钟，超出今日容量 180 分钟」「主线预留被固定课程挤掉」。
+  // 新口径：capacity 是“每天可自由安排 180 分钟”，上课只占时间轴。
+  const monday = '2026-11-23';
+  const profile = makeProfile({
+    goals: [
+      makeGoal({
+        id: 'g1',
+        kind: 'postgrad',
+        title: '争取保研（读研薪资更高则走这条）',
+        priority: 1,
+        nextActions: ['把高数第三章 3.1-3.2 习题做到 1-12 题', '整理机械制图点线面投影错题 10 道', '背 30 个机械制图术语英文对照'],
+      }),
+    ],
+    constraints: {
+      dailyMinutes: 180,
+      weekdayMinutes: { 0: 300, 1: 180, 2: 180, 3: 180, 4: 180, 5: 180, 6: 240 },
+      quietStart: '23:30',
+      quietEnd: '07:00',
+      wakeAt: '07:30',
+      sleepAt: '23:30',
+      daysOff: [],
+    },
+  });
+  const plan = planDay({
+    date: monday,
+    now: new Date('2026-11-23T08:00:00+08:00'),
+    profile,
+    tasks: [
+      makeTask({ id: 'c_math', title: '高等数学A(一)', kind: 'course', startAt: at(monday, '08:20'), endAt: at(monday, '10:00') }),
+      makeTask({ id: 'c_eng', title: '大学综合英语', kind: 'course', startAt: at(monday, '10:20'), endAt: at(monday, '12:00') }),
+      makeTask({ id: 'c_sizheng', title: '思想道德与法治', kind: 'course', startAt: at(monday, '14:00'), endAt: at(monday, '15:40') }),
+      makeTask({ id: 'c_xinli', title: '大学生心理健康', kind: 'course', startAt: at(monday, '16:00'), endAt: at(monday, '17:40') }),
+      makeTask({
+        id: 'f_eng',
+        title: '大学综合英语｜第1周 ①：Unit 5 Text A 精读 + 生词 30 个',
+        kind: 'study',
+        startAt: at(monday, '20:00'),
+        endAt: at(monday, '20:30'),
+      }),
+      makeTask({ id: 'f_math', title: '高数卷子：1 张（计时）', kind: 'practice', startAt: at(monday, '21:30'), endAt: at(monday, '22:30') }),
+      makeTask({ id: 't_over', title: '逾期的作业', kind: 'homework', dueAt: '2026-11-22T17:00:00+08:00', estMinutes: 60 }),
+    ],
+    history: [],
+    seed: 0,
+  });
+  assertPlanInvariants(plan);
+
+  // 固定安排 400 + 30 + 60 = 490 分钟全部占位（4 节课 + 2 个固定训练）
+  assert.equal(plan.load.capacity, 180);
+  assert.equal(plan.load.fixedMinutes, 490);
+  assert.equal(plan.load.planned, plan.totalMinutes - 490, 'planned 只算可自由安排的块');
+  assert.equal(plan.load.planned, 180, '可自由安排的时间应该真的被排满 180 分钟');
+  assert.ok(plan.totalMinutes > 500, `totalMinutes 含固定块，应该 > 500（实际 ${plan.totalMinutes}）`);
+
+  for (const courseId of ['c_math', 'c_eng', 'c_sizheng', 'c_xinli', 'f_eng', 'f_math']) {
+    assert.equal(blockOf(plan, courseId).length, 1, `${courseId} 应该原样占位一次`);
+  }
+  // 固定训练 kind 跟随任务本身（study/practice），不是一律 course
+  assert.equal(blockOf(plan, 'f_eng')[0].kind, 'study');
+  assert.equal(blockOf(plan, 'f_math')[0].kind, 'practice');
+
+  const reserve = plan.blocks.find((block) => block.title.startsWith('主线：'));
+  assert.ok(reserve, '有课日也必须能落下主线预留块');
+  assert.ok(reserve.why.includes('目标：争取保研'), '主线块的 why 正常（写目标 + 今天的具体动作）');
+  assert.ok(blockOf(plan, 't_over').length >= 1, '逾期任务照旧优先排入');
+
+  assert.ok(
+    !plan.warnings.some((warning) => warning.includes('固定课程已占')),
+    '不再输出「固定课程已占 X 分钟，超出今日容量 Y 分钟」',
+  );
+  assert.ok(
+    !plan.warnings.some((warning) => warning.includes('超出今日容量')),
+    '课程多但仍有空档不是异常，不该有“超出容量”告警',
+  );
+  assert.ok(!plan.warnings.some((warning) => warning.includes('主线预留被')), '主线排进去了就不该报被挤掉');
+  assert.ok(!plan.warnings.some((warning) => warning.includes('几乎没有可自由安排的时间')));
+});
+
+test('有课日：course 与固定训练只占时间轴，flexible 分钟数仍独立受 capacity 约束', () => {
+  const profile = makeProfile({
+    goals: [],
+    constraints: {
+      dailyMinutes: 60,
+      weekdayMinutes: { 0: 60, 1: 60, 2: 60, 3: 60, 4: 60, 5: 60, 6: 60 },
+      quietStart: '23:30',
+      quietEnd: '07:00',
+      wakeAt: '07:30',
+      sleepAt: '23:30',
+      daysOff: [],
+    },
+  });
+  const plan = planDay({
+    date: SATURDAY,
+    now: NOW,
+    profile,
+    tasks: [
+      makeTask({ id: 'k1', title: '上午课', kind: 'course', startAt: at(SATURDAY, '08:20'), endAt: at(SATURDAY, '10:00') }),
+      makeTask({ id: 'k2', title: '下午课', kind: 'course', startAt: at(SATURDAY, '14:00'), endAt: at(SATURDAY, '15:40') }),
+      makeTask({ id: 'k3', title: '晚间固定训练', kind: 'practice', startAt: at(SATURDAY, '20:00'), endAt: at(SATURDAY, '21:00') }),
+      makeTask({ id: 't_hw', title: '要写的作业', estMinutes: 90 }),
+    ],
+    history: [],
+    seed: 0,
+  });
+  assertPlanInvariants(plan);
+  assert.equal(plan.load.fixedMinutes, 100 + 100 + 60);
+  assert.ok(plan.load.planned <= 60, 'flexible 分钟数不得超过 capacity 60');
+  assert.ok(plan.totalMinutes > 60, 'totalMinutes 仍然包含固定块');
+  assert.ok(blockOf(plan, 't_hw').length >= 1, '课程不占预算，作业仍应排进可自由安排的时间');
+  const status = plan.unscheduled.find((item) => item.taskId === 't_hw');
+  if (status) assert.ok(status.reason.includes('剩余'), '排不完的部分要写清剩余分钟数');
 });
