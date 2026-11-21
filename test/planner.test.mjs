@@ -1591,3 +1591,45 @@ test('未来日期的固定课程实例不进入 unscheduled（避免每日计�
   assert.ok(!titles.includes('形势与政策'), '课程不在今天，不能排进今天');
 });
 
+
+test('白天生成今天的计划：不把块排到已经过去的时间，已结束的课不再占位', () => {
+  const profile = makeProfile({
+    constraints: {
+      ...makeProfile().constraints,
+      dailyMinutes: 180,
+      wakeAt: '07:30',
+      quietStart: '23:30',
+      daysOff: [],
+    },
+    goals: [],
+  });
+  const tasks = [
+    // 今天上午已经上完的课：不该再占位，也不该报「未安排」
+    makeTask({
+      id: 't_morning_class',
+      title: '高等数学A(一)',
+      kind: 'course',
+      startAt: at(SATURDAY, '08:20'),
+      endAt: at(SATURDAY, '10:00'),
+      estMinutes: 100,
+    }),
+    // 一件真任务：应该被排到「现在之后」
+    makeTask({ id: 't_afternoon', title: '画 SolidWorks 装配体', kind: 'practice', estMinutes: 60 }),
+  ];
+  const now = new Date('2026-11-21T14:00:00+08:00');
+  const plan = planDay({ date: SATURDAY, now, profile, tasks, seed: 11 });
+
+  const early = plan.blocks.filter((b) => minutesOfDay(b.start) < minutesOfDay('14:00'));
+  assert.deepEqual(early, [], '14:00 生成计划，不该还排 14:00 之前的块');
+
+  const titles = plan.blocks.map((b) => b.title);
+  assert.ok(!titles.includes('高等数学A(一)'), '上午已经结束的课不该再出现在计划里');
+
+  const ids = plan.unscheduled.map((u) => u.taskId);
+  assert.ok(!ids.includes('t_morning_class'), '已结束的课不该进「未安排」');
+
+  assert.ok(
+    plan.blocks.some((b) => b.title.includes('SolidWorks')),
+    '真任务应该被排进今天剩下的时间',
+  );
+});

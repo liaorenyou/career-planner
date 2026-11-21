@@ -27,7 +27,13 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statS
 import * as store from './lib/store.js';
 import { planDay } from './lib/planner.js';
 import { formatPlanMessage, planDisplayIndex, pushAll } from './lib/push.js';
-import { defaultPaths as imPaths, readStatusLog, readImBridgeMessages } from './lib/imsource.js';
+import {
+  defaultCredentialsPath,
+  defaultPaths as imPaths,
+  readImBridgeMessages,
+  readQQCredentials as readQQCredentialsFromYaml,
+  readStatusLog,
+} from './lib/imsource.js';
 
 // 行 id 与 cordis.patch.yml 对齐；改名会让已存的配置失效。
 export const name = 'career-planner';
@@ -262,7 +268,7 @@ export function apply(ctx, config = {}) {
   let data = null;
   let loadPromise = null;
   let digest = '';
-  let meta = { lastScanAt: '', lastScanCount: 0, lastPushText: '', lastPushDate: '', lastPushIndex: [], lastChatImportAt: '', lastChatImportCount: 0 };
+  let meta = { lastScanAt: '', lastScanCount: 0, lastPushText: '', lastPushDate: '', lastPushIndex: [], lastChatImportAt: '', lastChatImportCount: 0, lastQQOpenid: '' };
   let writeChain = Promise.resolve();
 
   function withLock(fn) {
@@ -284,6 +290,7 @@ export function apply(ctx, config = {}) {
             lastPushText: typeof savedMeta.lastPushText === 'string' ? savedMeta.lastPushText : '',
             lastPushDate: typeof savedMeta.lastPushDate === 'string' ? savedMeta.lastPushDate : '',
             lastPushIndex: Array.isArray(savedMeta.lastPushIndex) ? savedMeta.lastPushIndex : [],
+            lastQQOpenid: String(savedMeta.lastQQOpenid || ''),
             lastChatImportAt: typeof savedMeta.lastChatImportAt === 'string' ? savedMeta.lastChatImportAt : '',
             lastChatImportCount: Number(savedMeta.lastChatImportCount) || 0,
           };
@@ -488,21 +495,33 @@ export function apply(ctx, config = {}) {
   }
 
   // ---------------------------------------------------------------- 推送
+  // 机器人凭据有两条来源：宿主 credentials 服务（桌面 GUI 进程里才有），
+  // 以及 im-bridge 自己落盘的 ~/.dsh/.credentials.yaml。后台/无界面运行时
+  // 常常没有 credentials 服务，只认第一条会让 QQ 通道被静默跳过（2026-11-21
+  // 早上 8 点那次就是这样只发了本地文件），所以第二条必须兜底。
   async function readQQCredentials() {
-    if (!credentials || typeof credentials.readRecord !== 'function') return null;
-    try {
-      const record = await credentials.readRecord('im-bridge/bot');
-      if (!record) return null;
-      // im-bridge 用 ApiKeyRecord 的 env 装两个平台字段
-      const env = record.kind === 'api-key' && record.env && typeof record.env === 'object' ? record.env : null;
-      const appId = String(env?.QQ_BOT_APPID || record.key || '').trim();
-      const secret = String(env?.QQ_BOT_SECRET || '').trim();
-      if (!appId || !secret) return null;
-      return { appId, secret };
-    } catch (error) {
-      log('qq-credentials-failed', error);
-      return null;
+    if (credentials && typeof credentials.readRecord === 'function') {
+      try {
+        const record = await credentials.readRecord('im-bridge/bot');
+        if (record) {
+          // im-bridge 用 ApiKeyRecord 的 env 装两个平台字段
+          const env = record.kind === 'api-key' && record.env && typeof record.env === 'object' ? record.env : null;
+          const appId = String(env?.QQ_BOT_APPID || record.key || '').trim();
+          const secret = String(env?.QQ_BOT_SECRET || '').trim();
+          if (appId && secret) return { appId, secret, from: 'service' };
+        }
+      } catch (error) {
+        log('qq-credentials-service-failed', error);
+      }
     }
+    try {
+      const filePath = typeof defaultCredentialsPath === 'function' ? defaultCredentialsPath() : '';
+      const fromFile = filePath ? await readQQCredentialsFromYaml(filePath) : null;
+      if (fromFile && fromFile.appId && fromFile.secret) return { ...fromFile, from: 'file' };
+    } catch (error) {
+      log('qq-credentials-file-failed', error);
+    }
+    return null;
   }
 
   async function readImTraces() {
@@ -520,19 +539,32 @@ export function apply(ctx, config = {}) {
     const channels = Array.isArray(d.push.channels) ? d.push.channels : ['qq'];
     const traces = await readImTraces();
     const creds = await readQQCredentials();
-    const openid = traces.lastQQOpenid || '';
+    // 状态日志只扫尾部 400 行，早上/深夜可能会把 openid 挤出去；
+    // 记住上次学到的 openid，就不至于因为日志滚动而丢掉 QQ 通道。
+    const openid = traces.lastQQOpenid || meta.lastQQOpenid || '';
+    if (traces.lastQQOpenid && traces.lastQQOpenid !== meta.lastQQOpenid) {
+      meta.lastQQOpenid = traces.lastQQOpenid;
+      saveMeta().catch(() => undefined);
+    }
+    const wanted = (name) => channels.includes(name);
+    const notes = [];
+    if (wanted('qq')) {
+      if (!openid) notes.push('qq 未发送：还没收到过你的 QQ 私聊消息（拿不到 openid），先在手机上给机器人发一句「hi」');
+      else if (!creds) notes.push('qq 未发送：找不到机器人凭据（~/.dsh/.credentials.yaml 的 im-bridge/bot）');
+    }
     return {
       qq: {
-        enabled: channels.includes('qq') && Boolean(openid) && Boolean(creds),
+        enabled: wanted('qq') && Boolean(openid) && Boolean(creds),
         openid,
         appId: creds?.appId || '',
         secret: creds?.secret || '',
       },
       wechat: {
-        enabled: channels.includes('wechat'),
+        enabled: wanted('wechat'),
         tokenPath: imPaths().weixinToken,
       },
       file: { dir: join(p.base, 'outbox') },
+      notes,
     };
   }
 
@@ -547,6 +579,11 @@ export function apply(ctx, config = {}) {
     const results = await pushAll({ text: message, plan, targets });
     const byChannel = {};
     for (const r of results) byChannel[r.channel] = { ok: Boolean(r.ok), detail: String(r.detail || '').slice(0, 300) };
+    // 被跳过的通道要留痕：否则「8 点推了但手机上没收到」查不出来。
+    if (Array.isArray(targets.notes) && targets.notes.length) {
+      byChannel.skipped = targets.notes.join('；');
+      log('push-channel-skipped', targets.notes);
+    }
     d.push = await store.savePush(p, { ...d.push, lastPushAt: store.nowIso(), lastResult: byChannel });
     // 记住这次推送的「显示序号 → blockId」映射：用户按日报里的「完成 2」回复时，
     // 要从这里反查，否则编号跟 plan.blocks 的下标对不上（buffer/break 不展示）。
