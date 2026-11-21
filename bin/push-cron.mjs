@@ -177,7 +177,13 @@ export async function runPushCron({ argv = process.argv.slice(2), env = process.
 
   // ---- 幂等：今天成功推过就跳过（--force 忽略；--dry 只看不推）----
   const lastDate = lastPushDate(push, timeZone);
-  const alreadyPushed = lastDate === today;
+  // 只有真的推到人手上（qq/wechat）才算今天推过；只写了本地 outbox
+  // 不算，否则这条兜底会以为已经推过而跳过（2026-11-21 早上就是这么漏的）。
+  const lastResult = push?.lastResult && typeof push.lastResult === 'object' ? push.lastResult : {};
+  const delivered = Boolean(
+    (lastResult.qq && lastResult.qq.ok) || (lastResult.wechat && lastResult.wechat.ok),
+  );
+  const alreadyPushed = lastDate === today && delivered;
   const disabled = push.enabled === false;
 
   if (!args.dry && !args.force && (alreadyPushed || disabled)) {

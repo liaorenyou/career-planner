@@ -693,7 +693,10 @@ export function apply(ctx, config = {}) {
         }
         if (cancelled || !d.push.enabled) return;
         if (await pushAlreadyDoneToday()) return;
-        const lastAt = d.push.lastPushAt ? store.dateKeyIn(new Date(d.push.lastPushAt), cfg.timeZone) : '';
+        // 只有「真的推到手机上」才算已经推过；只落盘 outbox 的话这里要补推。
+        const lastAt = d.push.lastPushAt && pushDelivered(d.push.lastResult)
+          ? store.dateKeyIn(new Date(d.push.lastPushAt), cfg.timeZone)
+          : '';
         if (lastAt === today) return;
         const timeZone = d.push.timeZone || cfg.timeZone;
         const pushTime = store.parseHHMM(d.push.time) || cfg.pushTime;
@@ -814,13 +817,22 @@ export function apply(ctx, config = {}) {
 
   // 推送前从磁盘重读 push.json：另一条推送通道（bin/push-cron.mjs 由 launchd 每天 08:00 触发）
   // 可能已经推过，内存里的 lastPushAt 是启动时的旧值，不重读就会一天推两次。
+  // 「今天推过了」只认真正送到人手上的通道（qq / wechat）。
+  // 只写了本地 outbox 不算 —— 否则 lastPushAt 被一个失败日占住，
+  // launchd 那条兜底会以为已经推过而跳过，用户整天收不到（2026-11-21 踩过）。
+  function pushDelivered(result) {
+    const r = result && typeof result === 'object' ? result : {};
+    return Boolean((r.qq && r.qq.ok) || (r.wechat && r.wechat.ok));
+  }
+
   async function pushAlreadyDoneToday() {
     const d = await ensureData();
     const fresh = await store.readJson(p.push, null);
     if (!fresh || typeof fresh !== 'object' || !fresh.lastPushAt) return false;
     d.push = { ...d.push, lastPushAt: fresh.lastPushAt, lastResult: fresh.lastResult || d.push.lastResult };
     const today = store.dateKeyIn(new Date(), cfg.timeZone);
-    return store.dateKeyIn(new Date(fresh.lastPushAt), cfg.timeZone) === today;
+    if (store.dateKeyIn(new Date(fresh.lastPushAt), cfg.timeZone) !== today) return false;
+    return pushDelivered(fresh.lastResult);
   }
 
   function applyProfilePatch(patch = {}, { replaceGoals = false, replaceResources = false } = {}) {

@@ -870,7 +870,8 @@ test('push-cron：同日已推过 => skip: already pushed；--force 绕过且 fi
       timeZone: 'Asia/Shanghai',
       channels: ['file'],
       lastPushAt: '2026-11-20T00:05:00.000Z',
-      lastResult: {},
+      // 只有真的推到人手上（qq/wechat）才算「今天推过」
+      lastResult: { qq: { ok: true, status: 200, detail: '已发送（HTTP 200）' } },
     },
   });
 
@@ -901,6 +902,16 @@ test('push-cron：同日已推过 => skip: already pushed；--force 绕过且 fi
   const dry = await run(['--dry']);
   assert.equal(dry.action, 'dry');
   assert.ok(lines.includes('dry: not sent'));
+
+  // 回归：上一次只写了 file（lastResult 只有 file.ok），不该被当成「今天已推过」，
+  // 否则微信/QQ 挂了的那天，launchd 兜底会整天跳过（2026-11-21 真实事故）。
+  lines.length = 0;
+  const retry = await run(['--force']);
+  assert.equal(retry.action, 'push');
+  const pushAfter = JSON.parse(await readFile(path.join(base, 'push.json'), 'utf8'));
+  assert.equal(pushAfter.lastResult.file.ok, true);
+  const fileOnly = await run([]);
+  assert.equal(fileOnly.action, 'push', 'file-only 的 lastResult 不应算作已推送');
 });
 
 test('push-cron：push.enabled=false 时跳过（--force 仍可强推）', async (t) => {
